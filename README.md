@@ -10,6 +10,11 @@ Tasks are saved on the computer. The schedule can be exported to CSV or an `.ics
 file that opens in Outlook, Google Calendar, and Apple Calendar. No account or API
 key is needed.
 
+Streaming Studio also supports OBS WebSocket controls, Discord announcements,
+YouTube/Twitch planning, and TikTok desktop authorization plus draft video upload.
+For TikTok, register `http://127.0.0.1:*/callback/` as the Desktop redirect URI and
+enable Login Kit with `user.info.basic` and Content Posting API `video.upload`.
+
 ## Run from Python
 
 Python 3.10 or newer is recommended. From this folder, run:

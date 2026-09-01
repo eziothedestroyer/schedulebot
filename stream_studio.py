@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from credential_store import get as get_secret, set_secret
+from tiktok_client import TikTokClient
 
 try:
     import obsws_python as obs
@@ -52,10 +53,11 @@ class StreamStudio(tk.Toplevel):
         ttk.Label(header, text="  YouTube  •  Twitch  •  OBS", style="Muted.TLabel").pack(side="left", pady=(10, 0))
         book = ttk.Notebook(self, padding=16)
         book.pack(fill="both", expand=True)
-        planner, controls, discord = (ttk.Frame(book, padding=20) for _ in range(3))
+        planner, controls, discord, tiktok = (ttk.Frame(book, padding=20) for _ in range(4))
         book.add(planner, text="Stream setup")
         book.add(controls, text="OBS controls")
         book.add(discord, text="Discord")
+        book.add(tiktok, text="TikTok")
 
         self.platform = tk.StringVar(value="YouTube")
         self.title_var, self.category, self.tags, self.channel = (tk.StringVar() for _ in range(4))
@@ -144,6 +146,30 @@ class StreamStudio(tk.Toplevel):
         ttk.Button(discord_actions, text="Webhook help", command=lambda: webbrowser.open(
             "https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks")).pack(side="right", padx=8)
 
+        ttk.Label(tiktok, text="TikTok draft uploader", font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        ttk.Label(tiktok, text="Connect your own account, choose a video, then send it to TikTok as a draft.\n"
+                  "You finish editing and publishing from the TikTok inbox notification.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(4, 16))
+        self.tiktok_key = tk.StringVar()
+        self.tiktok_secret = tk.StringVar()
+        self.tiktok_video = tk.StringVar()
+        self.tiktok_publish_id = tk.StringVar()
+        for label, variable, hidden in (("Client key", self.tiktok_key, False),
+                                        ("Client secret", self.tiktok_secret, True)):
+            line = ttk.Frame(tiktok); line.pack(fill="x", pady=5)
+            ttk.Label(line, text=label, width=16).pack(side="left")
+            ttk.Entry(line, textvariable=variable, show="•" if hidden else "").pack(side="left", fill="x", expand=True)
+        ttk.Button(tiktok, text="Save credentials", command=self.save_tiktok_credentials).pack(anchor="w", pady=(8, 14))
+        row = ttk.Frame(tiktok); row.pack(fill="x", pady=5)
+        ttk.Entry(row, textvariable=self.tiktok_video, state="readonly").pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="Choose video", command=self.choose_tiktok_video).pack(side="left", padx=(8, 0))
+        actions = ttk.Frame(tiktok); actions.pack(fill="x", pady=14)
+        ttk.Button(actions, text="Connect TikTok", style="Accent.TButton", command=self.connect_tiktok).pack(side="left")
+        ttk.Button(actions, text="Upload as draft", command=self.upload_tiktok).pack(side="left", padx=8)
+        ttk.Button(actions, text="Check status", command=self.check_tiktok_status).pack(side="left")
+        self.tiktok_status = ttk.Label(tiktok, text="Not connected", wraplength=690)
+        self.tiktok_status.pack(anchor="w", pady=10)
+
     def load(self):
         values = self.settings
         self.platform.set(values.get("platform", "YouTube"))
@@ -152,6 +178,9 @@ class StreamStudio(tk.Toplevel):
         self.description.insert("1.0", values.get("description", ""))
         self.obs_host.set(values.get("obs_host", "localhost")); self.obs_port.set(str(values.get("obs_port", 4455)))
         self.obs_password.set(get_secret("obs_password"))
+        self.tiktok_key.set(values.get("tiktok_client_key", ""))
+        self.tiktok_secret.set(get_secret("tiktok_client_secret"))
+        self.tiktok_publish_id.set(values.get("tiktok_publish_id", ""))
         for variable, checked in zip(self.check_vars, values.get("checklist", [])):
             variable.set(checked)
 
@@ -162,6 +191,61 @@ class StreamStudio(tk.Toplevel):
             obs_port=self.obs_port.get().strip(),
             checklist=[item.get() for item in self.check_vars])
         self.owner.save()
+
+    def save_tiktok_credentials(self):
+        self.settings["tiktok_client_key"] = self.tiktok_key.get().strip()
+        set_secret("tiktok_client_secret", self.tiktok_secret.get().strip())
+        self.owner.save()
+        self.tiktok_status.configure(text="TikTok credentials saved in the local credential vault")
+
+    def choose_tiktok_video(self):
+        path = filedialog.askopenfilename(parent=self, title="Choose a TikTok video",
+            filetypes=(("Videos", "*.mp4 *.mov *.webm"), ("All files", "*.*")))
+        if path:
+            self.tiktok_video.set(path)
+
+    def _tiktok_client(self):
+        return TikTokClient(self.tiktok_key.get(), self.tiktok_secret.get())
+
+    def connect_tiktok(self):
+        self.save_tiktok_credentials()
+        self.tiktok_status.configure(text="Waiting for TikTok login and consent in your browser…")
+        def work():
+            try:
+                self._tiktok_client().connect()
+                self.after(0, lambda: self.tiktok_status.configure(text="TikTok account connected"))
+            except Exception as error:
+                self.after(0, lambda detail=str(error): messagebox.showerror("TikTok connection failed", detail, parent=self))
+        threading.Thread(target=work, daemon=True).start()
+
+    def upload_tiktok(self):
+        self.save_tiktok_credentials()
+        path = Path(self.tiktok_video.get())
+        if not path.is_file():
+            messagebox.showerror("Video needed", "Choose an MP4, MOV, or WebM video first.", parent=self); return
+        self.tiktok_status.configure(text="Uploading draft to TikTok…")
+        def work():
+            try:
+                publish_id = self._tiktok_client().upload_draft(path)
+                self.tiktok_publish_id.set(publish_id)
+                self.settings["tiktok_publish_id"] = publish_id; self.owner.save()
+                self.after(0, lambda: self.tiktok_status.configure(
+                    text="Draft uploaded. Open TikTok and use the inbox notification to finish publishing."))
+            except Exception as error:
+                self.after(0, lambda detail=str(error): messagebox.showerror("TikTok upload failed", detail, parent=self))
+        threading.Thread(target=work, daemon=True).start()
+
+    def check_tiktok_status(self):
+        if not self.tiktok_publish_id.get():
+            messagebox.showerror("No upload", "Upload a draft first.", parent=self); return
+        def work():
+            try:
+                result = self._tiktok_client().status(self.tiktok_publish_id.get())
+                status = result.get("data", {}).get("status", json.dumps(result.get("data", {})))
+                self.after(0, lambda: self.tiktok_status.configure(text=f"TikTok status: {status}"))
+            except Exception as error:
+                self.after(0, lambda detail=str(error): messagebox.showerror("TikTok status failed", detail, parent=self))
+        threading.Thread(target=work, daemon=True).start()
 
     def save_with_notice(self):
         self.save()
