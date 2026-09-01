@@ -1,0 +1,10 @@
+private/
+.build-venv/
+build/
+dist/
+windows-build/
+windows-dist/
+__pycache__/
+*.pyc
+schedule.json
+.github/workflows/

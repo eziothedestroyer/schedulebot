@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ScheduleBot
+Comment=Create a schedule using plain English
+Exec=ScheduleBot
+Icon=x-office-calendar
+Terminal=false
+Categories=Office;Calendar;
+
