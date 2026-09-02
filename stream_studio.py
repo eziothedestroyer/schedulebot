@@ -7,10 +7,12 @@ import threading
 import urllib.error
 import urllib.request
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from credential_store import get as get_secret, set_secret
 from tiktok_client import TikTokClient
+from youtube_client import YouTubeClient
 
 try:
     import obsws_python as obs
@@ -53,10 +55,11 @@ class StreamStudio(tk.Toplevel):
         ttk.Label(header, text="  YouTube  •  Twitch  •  OBS", style="Muted.TLabel").pack(side="left", pady=(10, 0))
         book = ttk.Notebook(self, padding=16)
         book.pack(fill="both", expand=True)
-        planner, controls, discord, tiktok = (ttk.Frame(book, padding=20) for _ in range(4))
+        planner, controls, discord, youtube, tiktok = (ttk.Frame(book, padding=20) for _ in range(5))
         book.add(planner, text="Stream setup")
         book.add(controls, text="OBS controls")
         book.add(discord, text="Discord")
+        book.add(youtube, text="YouTube")
         book.add(tiktok, text="TikTok")
 
         self.platform = tk.StringVar(value="YouTube")
@@ -170,6 +173,29 @@ class StreamStudio(tk.Toplevel):
         self.tiktok_status = ttk.Label(tiktok, text="Not connected", wraplength=690)
         self.tiktok_status.pack(anchor="w", pady=10)
 
+        ttk.Label(youtube, text="YouTube Live scheduler", font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        ttk.Label(youtube, text="Connect your channel and create a scheduled broadcast from the stream setup.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(4, 16))
+        self.youtube_start = tk.StringVar(value=(datetime.now() + timedelta(days=1)).replace(
+            hour=19, minute=0, second=0, microsecond=0).isoformat(timespec="minutes"))
+        self.youtube_privacy = tk.StringVar(value="private")
+        line = ttk.Frame(youtube); line.pack(fill="x", pady=5)
+        ttk.Label(line, text="Start (local time)", width=18).pack(side="left")
+        ttk.Entry(line, textvariable=self.youtube_start).pack(side="left", fill="x", expand=True)
+        ttk.Label(youtube, text="Use YYYY-MM-DDTHH:MM, for example 2026-09-02T19:00",
+                  style="Muted.TLabel").pack(anchor="w", padx=(145, 0))
+        line = ttk.Frame(youtube); line.pack(fill="x", pady=10)
+        ttk.Label(line, text="Privacy", width=18).pack(side="left")
+        ttk.Combobox(line, textvariable=self.youtube_privacy, values=("private", "unlisted", "public"),
+                     state="readonly").pack(side="left", fill="x", expand=True)
+        actions = ttk.Frame(youtube); actions.pack(fill="x", pady=14)
+        ttk.Button(actions, text="Connect YouTube", style="Accent.TButton",
+                   command=self.connect_youtube).pack(side="left")
+        ttk.Button(actions, text="Create scheduled broadcast",
+                   command=self.create_youtube_broadcast).pack(side="left", padx=8)
+        self.youtube_status = ttk.Label(youtube, text="Not connected", wraplength=690)
+        self.youtube_status.pack(anchor="w", pady=10)
+
     def load(self):
         values = self.settings
         self.platform.set(values.get("platform", "YouTube"))
@@ -263,6 +289,44 @@ class StreamStudio(tk.Toplevel):
                 self.after(0, lambda: self.tiktok_status.configure(text=f"TikTok status: {status}"))
             except Exception as error:
                 self.after(0, lambda detail=str(error): messagebox.showerror("TikTok status failed", detail, parent=self))
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def youtube_credentials_path():
+        candidates = [Path.home() / "ScheduleBot" / "private" / "youtube-client-secret.json"]
+        if os.getenv("APPDATA"):
+            candidates.insert(0, Path(os.environ["APPDATA"]) / "ScheduleBot" / "private" / "youtube-client-secret.json")
+        return next((path for path in candidates if path.is_file()), candidates[0])
+
+    def connect_youtube(self):
+        path = self.youtube_credentials_path()
+        if not path.is_file():
+            messagebox.showerror("Google OAuth file needed",
+                "Put your Desktop OAuth JSON at ScheduleBot/private/youtube-client-secret.json.", parent=self); return
+        self.youtube_status.configure(text="Waiting for Google login and consent in your browser…")
+        def work():
+            try:
+                YouTubeClient(path).connect()
+                self.after(0, lambda: self.youtube_status.configure(text="YouTube account connected"))
+            except Exception as error:
+                self.after(0, lambda detail=str(error): messagebox.showerror("YouTube connection failed", detail, parent=self))
+        threading.Thread(target=work, daemon=True).start()
+
+    def create_youtube_broadcast(self):
+        title = self.title_var.get().strip()
+        if not title:
+            messagebox.showerror("Title needed", "Enter a stream title on the Stream setup tab first.", parent=self); return
+        description = self.description.get("1.0", "end-1c")
+        start, privacy, path = self.youtube_start.get(), self.youtube_privacy.get(), self.youtube_credentials_path()
+        self.youtube_status.configure(text="Creating YouTube broadcast…")
+        def work():
+            try:
+                result = YouTubeClient(path).create_broadcast(title, description, start, privacy)
+                video_id = result.get("id", "")
+                self.after(0, lambda: self.youtube_status.configure(
+                    text=f"Broadcast created: https://youtu.be/{video_id}"))
+            except Exception as error:
+                self.after(0, lambda detail=str(error): messagebox.showerror("YouTube scheduling failed", detail, parent=self))
         threading.Thread(target=work, daemon=True).start()
 
     def save_with_notice(self):
