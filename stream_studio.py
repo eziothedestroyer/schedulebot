@@ -178,8 +178,10 @@ class StreamStudio(tk.Toplevel):
         self.description.insert("1.0", values.get("description", ""))
         self.obs_host.set(values.get("obs_host", "localhost")); self.obs_port.set(str(values.get("obs_port", 4455)))
         self.obs_password.set(get_secret("obs_password"))
-        self.tiktok_key.set(values.get("tiktok_client_key", ""))
-        self.tiktok_secret.set(get_secret("tiktok_client_secret"))
+        self.tiktok_key.set(values.get("tiktok_client_key", "") or
+                            get_secret("tiktok_client_key") or self._private_text("tiktok-client-key.txt"))
+        self.tiktok_secret.set(get_secret("tiktok_client_secret") or
+                               self._private_text("tiktok-client-secret.txt"))
         self.tiktok_publish_id.set(values.get("tiktok_publish_id", ""))
         for variable, checked in zip(self.check_vars, values.get("checklist", [])):
             variable.set(checked)
@@ -194,9 +196,25 @@ class StreamStudio(tk.Toplevel):
 
     def save_tiktok_credentials(self):
         self.settings["tiktok_client_key"] = self.tiktok_key.get().strip()
+        set_secret("tiktok_client_key", self.tiktok_key.get().strip())
         set_secret("tiktok_client_secret", self.tiktok_secret.get().strip())
         self.owner.save()
         self.tiktok_status.configure(text="TikTok credentials saved in the local credential vault")
+
+    @staticmethod
+    def _private_text(filename):
+        """Load a locally protected credential without logging or displaying it."""
+        candidates = [Path.home() / "ScheduleBot" / "private" / filename]
+        if os.getenv("APPDATA"):
+            candidates.insert(0, Path(os.environ["APPDATA"]) / "ScheduleBot" / "private" / filename)
+        for path in candidates:
+            try:
+                value = path.read_text(encoding="utf-8").strip()
+                if value:
+                    return value
+            except OSError:
+                pass
+        return ""
 
     def choose_tiktok_video(self):
         path = filedialog.askopenfilename(parent=self, title="Choose a TikTok video",
