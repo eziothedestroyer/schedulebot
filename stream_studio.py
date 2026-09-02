@@ -13,6 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 from credential_store import get as get_secret, set_secret
 from tiktok_client import TikTokClient
 from youtube_client import YouTubeClient
+from meta_client import MetaClient
 
 try:
     import obsws_python as obs
@@ -55,11 +56,12 @@ class StreamStudio(tk.Toplevel):
         ttk.Label(header, text="  YouTube  •  Twitch  •  OBS", style="Muted.TLabel").pack(side="left", pady=(10, 0))
         book = ttk.Notebook(self, padding=16)
         book.pack(fill="both", expand=True)
-        planner, controls, discord, youtube, tiktok = (ttk.Frame(book, padding=20) for _ in range(5))
+        planner, controls, discord, youtube, meta, tiktok = (ttk.Frame(book, padding=20) for _ in range(6))
         book.add(planner, text="Stream setup")
         book.add(controls, text="OBS controls")
         book.add(discord, text="Discord")
         book.add(youtube, text="YouTube")
+        book.add(meta, text="Facebook + Instagram")
         book.add(tiktok, text="TikTok")
 
         self.platform = tk.StringVar(value="YouTube")
@@ -196,6 +198,27 @@ class StreamStudio(tk.Toplevel):
         self.youtube_status = ttk.Label(youtube, text="Not connected", wraplength=690)
         self.youtube_status.pack(anchor="w", pady=10)
 
+        ttk.Label(meta, text="Facebook + Instagram publisher", font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        ttk.Label(meta, text="Post to Pages and linked professional Instagram accounts you manage.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(4, 12))
+        self.meta_pages, self.meta_page_map = tk.StringVar(), {}
+        self.meta_page = ttk.Combobox(meta, textvariable=self.meta_pages, state="readonly")
+        self.meta_page.pack(fill="x", pady=5)
+        self.meta_media_url = tk.StringVar()
+        ttk.Label(meta, text="Public media or link URL").pack(anchor="w", pady=(10, 2))
+        ttk.Entry(meta, textvariable=self.meta_media_url).pack(fill="x")
+        ttk.Label(meta, text="Post text / Instagram caption").pack(anchor="w", pady=(10, 2))
+        self.meta_message = tk.Text(meta, height=9, wrap="word", bg="#151c32", fg="#ffffff",
+                                    insertbackground="#ffffff", relief="flat", padx=10, pady=10)
+        self.meta_message.pack(fill="both", expand=True)
+        row = ttk.Frame(meta); row.pack(fill="x", pady=12)
+        ttk.Button(row, text="Connect Meta", style="Accent.TButton", command=self.connect_meta).pack(side="left")
+        ttk.Button(row, text="Load Pages", command=self.load_meta_pages).pack(side="left", padx=6)
+        ttk.Button(row, text="Post to Facebook", command=self.post_facebook).pack(side="left")
+        ttk.Button(row, text="Post to Instagram", command=self.post_instagram).pack(side="left", padx=6)
+        self.meta_status = ttk.Label(meta, text="Not connected", wraplength=690)
+        self.meta_status.pack(anchor="w")
+
     def load(self):
         values = self.settings
         self.platform.set(values.get("platform", "YouTube"))
@@ -328,6 +351,57 @@ class StreamStudio(tk.Toplevel):
             except Exception as error:
                 self.after(0, lambda detail=str(error): messagebox.showerror("YouTube scheduling failed", detail, parent=self))
         threading.Thread(target=work, daemon=True).start()
+
+    def connect_meta(self):
+        self.meta_status.configure(text="Waiting for Facebook login and consent…")
+        def work():
+            try:
+                MetaClient.from_private_files().connect()
+                self.after(0, lambda: self.meta_status.configure(text="Meta account connected"))
+            except Exception as error:
+                self.after(0, lambda detail=str(error): messagebox.showerror("Meta connection failed", detail, parent=self))
+        threading.Thread(target=work, daemon=True).start()
+
+    def load_meta_pages(self):
+        def work():
+            try:
+                pages = MetaClient.from_private_files().pages()
+                self.meta_page_map = {page["name"]: page for page in pages}
+                def done():
+                    names = list(self.meta_page_map); self.meta_page.configure(values=names)
+                    if names: self.meta_pages.set(names[0])
+                    self.meta_status.configure(text=f"Loaded {len(names)} managed Page(s)")
+                self.after(0, done)
+            except Exception as error:
+                self.after(0, lambda detail=str(error): messagebox.showerror("Could not load Pages", detail, parent=self))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _selected_meta_page(self):
+        page = self.meta_page_map.get(self.meta_pages.get())
+        if not page: raise RuntimeError("Connect Meta and load your Pages first.")
+        return page
+
+    def post_facebook(self):
+        try: page = self._selected_meta_page()
+        except Exception as error: messagebox.showerror("Page needed", str(error), parent=self); return
+        message, link = self.meta_message.get("1.0", "end-1c").strip(), self.meta_media_url.get().strip()
+        threading.Thread(target=self._meta_post_worker, args=("facebook", page, message, link), daemon=True).start()
+
+    def post_instagram(self):
+        try: page = self._selected_meta_page()
+        except Exception as error: messagebox.showerror("Page needed", str(error), parent=self); return
+        caption, url = self.meta_message.get("1.0", "end-1c").strip(), self.meta_media_url.get().strip()
+        if not url.startswith("https://"):
+            messagebox.showerror("Public URL needed", "Instagram requires a public HTTPS image or video URL.", parent=self); return
+        threading.Thread(target=self._meta_post_worker, args=("instagram", page, caption, url), daemon=True).start()
+
+    def _meta_post_worker(self, platform, page, message, url):
+        try:
+            client = MetaClient.from_private_files()
+            result = client.facebook_post(page, message, url) if platform == "facebook" else client.instagram_post(page, url, message)
+            self.after(0, lambda: self.meta_status.configure(text=f"Posted to {platform.title()}: {result.get('id', 'complete')}"))
+        except Exception as error:
+            self.after(0, lambda detail=str(error): messagebox.showerror("Meta post failed", detail, parent=self))
 
     def save_with_notice(self):
         self.save()
