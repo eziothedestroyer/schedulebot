@@ -7,4 +7,9 @@ windows-dist/
 __pycache__/
 *.pyc
 schedule.json
-.github/workflows/
+.pytest_cache/
+.coverage
+*.log
+.env
+.env.*
+!.env.example

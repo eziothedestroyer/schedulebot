@@ -4,7 +4,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import mimetypes
 import secrets
+import time
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -17,7 +19,8 @@ from credential_store import get as get_secret, set_secret
 AUTH = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN = "https://oauth2.googleapis.com/token"
 API = "https://www.googleapis.com/youtube/v3"
-SCOPE = "https://www.googleapis.com/auth/youtube"
+UPLOAD_API = "https://www.googleapis.com/upload/youtube/v3/videos"
+SCOPE = "https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/yt-analytics.readonly"
 
 
 def _json_request(url, *, data=None, token="", form=False):
@@ -88,3 +91,116 @@ class YouTubeClient:
                 "contentDetails": {"enableAutoStart": True, "enableAutoStop": True}}
         url = f"{API}/liveBroadcasts?part=snippet,status,contentDetails"
         return _json_request(url, data=json.dumps(body).encode(), token=self.access_token())
+
+    def upload_video(self, path, title, description="", privacy="private", tags=None,
+                     progress_callback=None, chunk_size=8 * 1024 * 1024):
+        """Upload a regular video or VOD with YouTube's resumable protocol."""
+        path = Path(path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Video file not found: {path}")
+        if not title.strip():
+            raise ValueError("Enter a video title before uploading.")
+        if privacy not in {"private", "unlisted", "public"}:
+            raise ValueError("Privacy must be private, unlisted, or public.")
+        total = path.stat().st_size
+        if total < 1:
+            raise ValueError("The selected video file is empty.")
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if not (mime.startswith("video/") or mime == "application/octet-stream"):
+            mime = "application/octet-stream"
+        body = json.dumps({
+            "snippet": {"title": title.strip(), "description": description.strip(),
+                        "tags": [tag.strip() for tag in (tags or []) if tag.strip()]},
+            "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False},
+        }).encode()
+        request = urllib.request.Request(
+            UPLOAD_API + "?uploadType=resumable&part=snippet,status",
+            data=body, method="POST", headers={
+                "Authorization": "Bearer " + self.access_token(),
+                "Content-Type": "application/json; charset=UTF-8",
+                "X-Upload-Content-Length": str(total),
+                "X-Upload-Content-Type": mime,
+            })
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                upload_url = response.headers.get("Location")
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(self._google_error(error, "YouTube rejected the upload request.")) from error
+        except urllib.error.URLError as error:
+            raise RuntimeError("Could not reach YouTube. Check your internet connection and try again.") from error
+        if not upload_url:
+            raise RuntimeError("YouTube did not return a resumable upload URL.")
+
+        sent = 0
+        with path.open("rb") as video:
+            while sent < total:
+                video.seek(sent)
+                chunk = video.read(min(chunk_size, total - sent))
+                end = sent + len(chunk) - 1
+                upload = urllib.request.Request(upload_url, data=chunk, method="PUT", headers={
+                    "Authorization": "Bearer " + self.access_token(),
+                    "Content-Type": mime,
+                    "Content-Length": str(len(chunk)),
+                    "Content-Range": f"bytes {sent}-{end}/{total}",
+                })
+                for attempt in range(4):
+                    try:
+                        with urllib.request.urlopen(upload, timeout=300) as response:
+                            result = json.loads(response.read().decode("utf-8"))
+                        sent = end + 1
+                        if progress_callback:
+                            progress_callback(sent, total)
+                        if sent >= total:
+                            return result
+                        break
+                    except urllib.error.HTTPError as error:
+                        if error.code == 308:
+                            received = error.headers.get("Range", "")
+                            sent = int(received.rsplit("-", 1)[-1]) + 1 if "-" in received else sent
+                            if progress_callback:
+                                progress_callback(sent, total)
+                            break
+                        if error.code in {500, 502, 503, 504} and attempt < 3:
+                            time.sleep(2 ** attempt)
+                            continue
+                        raise RuntimeError(self._google_error(error, "YouTube video upload failed.")) from error
+                    except urllib.error.URLError as error:
+                        if attempt < 3:
+                            time.sleep(2 ** attempt)
+                            continue
+                        raise RuntimeError("The YouTube upload was interrupted. Check your connection and try again.") from error
+        raise RuntimeError("YouTube ended the upload without returning a video ID.")
+
+    @staticmethod
+    def _google_error(error, fallback):
+        try:
+            payload = json.loads(error.read().decode("utf-8"))
+            return payload.get("error", {}).get("message") or fallback
+        except Exception:
+            return fallback
+
+    def create_stream(self, title="ScheduleBot OBS Stream"):
+        body = {"snippet": {"title": title}, "cdn": {"frameRate": "variable",
+                "ingestionType": "rtmp", "resolution": "variable"},
+                "contentDetails": {"isReusable": True}}
+        return _json_request(f"{API}/liveStreams?part=snippet,cdn,contentDetails",
+                             data=json.dumps(body).encode(), token=self.access_token())
+
+    def bind(self, broadcast_id, stream_id):
+        return _json_request(f"{API}/liveBroadcasts/bind?id={urllib.parse.quote(broadcast_id)}&part=id,contentDetails&streamId={urllib.parse.quote(stream_id)}",
+                             data=b"", token=self.access_token())
+
+    def transition(self, broadcast_id, status):
+        return _json_request(f"{API}/liveBroadcasts/transition?id={urllib.parse.quote(broadcast_id)}&part=id,status&broadcastStatus={urllib.parse.quote(status)}",
+                             data=b"", token=self.access_token())
+
+    def delete_chat_message(self, message_id):
+        request = urllib.request.Request(f"{API}/liveChat/messages?id={urllib.parse.quote(message_id)}",
+            method="DELETE", headers={"Authorization": f"Bearer {self.access_token()}"})
+        with urllib.request.urlopen(request, timeout=60): pass
+
+    def analytics(self, start_date, end_date):
+        query = urllib.parse.urlencode({"ids": "channel==MINE", "startDate": start_date,
+            "endDate": end_date, "metrics": "views,estimatedMinutesWatched,averageViewDuration,subscribersGained",
+            "dimensions": "day", "sort": "day"})
+        return _json_request(f"https://youtubeanalytics.googleapis.com/v2/reports?{query}", token=self.access_token())

@@ -3,9 +3,12 @@ from __future__ import annotations
 import csv
 import json
 import os
+import sys
 import tkinter as tk
 import uuid
 import calendar
+import webbrowser
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -16,6 +19,89 @@ from version import VERSION
 
 
 APP_NAME = "ScheduleBot"
+
+SETUP_GUIDES = {
+    "Start here": (
+        "ScheduleBot keeps secrets in your operating system credential vault. Never post a client secret, "
+        "bot token, webhook URL, or API key in chat or commit one to Git.\n\n"
+        "You only need credentials for the integrations you plan to use. OBS and Local Ollama do not need "
+        "cloud API keys. Open Streaming Studio after completing a section below and enter the credential on "
+        "the matching tab."
+    ),
+    "Twitch": (
+        "1. Sign in to the Twitch Developer Console. Your Twitch account must have a verified email address "
+        "and two-factor authentication enabled.\n\n"
+        "2. Open Applications and choose Register Your Application. Give it a unique name such as "
+        "ScheduleBot YourName.\n\n"
+        "3. Add http://localhost as the OAuth Redirect URL, select an appropriate category, complete the "
+        "verification, and create the app. ScheduleBot uses Twitch's device authorization page, so it does "
+        "not receive your Twitch password.\n\n"
+        "4. Choose Manage beside the new app and copy the Client ID. A client secret is optional for the "
+        "device flow used here; if you create one, treat it like a password.\n\n"
+        "5. In ScheduleBot, open Streaming Studio → Twitch, paste the Client ID (and optional secret), choose "
+        "Save Twitch credentials securely, then Connect Twitch. Enter the displayed code in the browser."
+    ),
+    "YouTube": (
+        "1. Open Google Cloud Console, create or select a project, then enable YouTube Data API v3. If you "
+        "want the analytics features, also enable YouTube Analytics API.\n\n"
+        "2. Open Google Auth Platform. Configure Branding and Audience. For personal testing, External is "
+        "usually appropriate; add your Google account as a test user while the app is in testing.\n\n"
+        "3. Open Clients, choose Create client, select Desktop app, name it ScheduleBot, and create it. "
+        "Download the OAuth client JSON file. You do not need a separate API key for YouTube Live.\n\n"
+        "4. In ScheduleBot, open Streaming Studio → YouTube, choose that JSON file, then click Connect "
+        "YouTube. Sign in to the YouTube channel you want to manage and approve access.\n\n"
+        "5. Keep the JSON private. Start by creating a private or unlisted test broadcast. Google may show an "
+        "unverified-app warning while a personal OAuth app remains in testing."
+    ),
+    "Discord": (
+        "Easiest option — webhook:\n"
+        "1. In Discord, open Server Settings → Integrations → Webhooks. Create a webhook, choose a text "
+        "channel, and copy its URL. You need Manage Webhooks permission.\n"
+        "2. Paste the URL into Streaming Studio → Discord under Optional webhook fallback. A webhook URL is "
+        "a secret because anyone holding it can post to that channel.\n\n"
+        "Bot option — channel picker:\n"
+        "1. In the Discord Developer Portal choose New Application. Open Bot and reset/copy the bot token. "
+        "Save only the token in a plain .txt file; ScheduleBot moves it into the credential vault.\n"
+        "2. Open Installation and add the bot scope with View Channels and Send Messages permissions. Copy "
+        "the install link, open it, and add the bot to your server.\n"
+        "3. In Streaming Studio → Discord choose the token file, then Load channels. Delete the temporary "
+        "token file after ScheduleBot confirms it was secured. Regenerate the token immediately if exposed."
+    ),
+    "OpenAI": (
+        "1. Sign in to the OpenAI Platform and open API Keys. API billing is separate from a ChatGPT "
+        "subscription, so add billing or project credits if your API project requires it.\n\n"
+        "2. Choose Create new secret key. Prefer a project-scoped key with restricted permissions when those "
+        "controls are available. Copy it once and store it safely; do not share it.\n\n"
+        "3. In ScheduleBot open Streaming Studio → AI VOD, select OpenAI, paste the key, choose a model, and "
+        "click Save securely. ScheduleBot stores it in the OS credential vault and sends transcript text—not "
+        "the source video—to the Responses API with response storage disabled.\n\n"
+        "No-key alternative: select Local Ollama, install Ollama and run `ollama pull llama3.2`. Transcript "
+        "processing then stays on this computer."
+    ),
+    "OBS": (
+        "1. Open OBS Studio. In OBS 28 or newer, WebSocket support is built in.\n\n"
+        "2. Choose Tools → WebSocket Server Settings, enable the server, keep port 4455 unless you have a "
+        "reason to change it, enable authentication, and create a strong password.\n\n"
+        "3. In Streaming Studio → OBS controls, use host localhost, the same port and password, then click "
+        "Connect to OBS. This is a local connection and does not require an API key.\n\n"
+        "4. Configure your streaming service and stream key inside OBS separately. Clicking Start streaming "
+        "in ScheduleBot can broadcast publicly, so test scenes and destinations first."
+    ),
+}
+
+SETUP_URLS = {
+    "Twitch": "https://dev.twitch.tv/console/apps",
+    "YouTube": "https://console.cloud.google.com/apis/credentials",
+    "Discord": "https://discord.com/developers/applications",
+    "OpenAI": "https://platform.openai.com/api-keys",
+    "OBS": "https://obsproject.com/kb/remote-control-guide",
+}
+
+
+def bundled_file(name: str) -> Path:
+    """Return an asset path in source runs and PyInstaller builds."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / name
 
 
 def data_file() -> Path:
@@ -31,6 +117,7 @@ class ScheduleBot(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"ScheduleBot {VERSION}")
+        self.set_app_icon()
         self.geometry("1060x680")
         self.minsize(860, 560)
         self.configure(bg="#0b1020")
@@ -42,10 +129,26 @@ class ScheduleBot(tk.Tk):
         self.selected_date = today
         self._build()
         self.refresh()
+        if not self.stream_settings.get("onboarding_seen"):
+            self.after(350, self.show_getting_started)
+
+    def set_app_icon(self):
+        """Apply the brand icon to the window, taskbar, and dialogs."""
+        try:
+            self._app_icon = tk.PhotoImage(file=bundled_file("schedulebot-icon.png"))
+            self.iconphoto(True, self._app_icon)
+        except (tk.TclError, OSError):
+            # The app should still start if an external source checkout omits assets.
+            self._app_icon = None
 
     def configure_styles(self):
         style = ttk.Style(self)
         style.theme_use("clam")
+        # Keep native pop-up lists consistent with the dark theme as well.
+        self.option_add("*TCombobox*Listbox.background", "#151c32")
+        self.option_add("*TCombobox*Listbox.foreground", "#ffffff")
+        self.option_add("*TCombobox*Listbox.selectBackground", "#6548dc")
+        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
         style.configure(".", background="#0b1020", foreground="#e8ecff",
                         fieldbackground="#151c32", bordercolor="#2a3558",
                         lightcolor="#2a3558", darkcolor="#2a3558", font=("Segoe UI", 10))
@@ -56,8 +159,20 @@ class ScheduleBot(tk.Tk):
         style.configure("Hero.TLabel", background="#0b1020", foreground="#ffffff", font=("Segoe UI", 24, "bold"))
         style.configure("Muted.TLabel", background="#0b1020", foreground="#929dc2")
         style.configure("Saved.TLabel", background="#0b1020", foreground="#62d6a7")
-        style.configure("TEntry", padding=10, fieldbackground="#151c32", foreground="#ffffff", insertcolor="#ffffff")
-        style.configure("TCombobox", padding=7, fieldbackground="#151c32", foreground="#ffffff")
+        style.configure("TEntry", padding=10, background="#151c32", fieldbackground="#151c32",
+                        foreground="#ffffff", insertcolor="#ffffff", bordercolor="#344368")
+        style.map("TEntry",
+                  fieldbackground=[("disabled", "#11182a"), ("readonly", "#151c32"), ("focus", "#19223b")],
+                  foreground=[("disabled", "#aeb8d8"), ("readonly", "#ffffff")],
+                  bordercolor=[("focus", "#9278ff")])
+        style.configure("TCombobox", padding=7, background="#202a48", fieldbackground="#151c32",
+                        foreground="#ffffff", arrowcolor="#ffffff", bordercolor="#344368")
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", "#151c32"), ("disabled", "#11182a"), ("focus", "#19223b")],
+                  foreground=[("readonly", "#ffffff"), ("disabled", "#aeb8d8")],
+                  background=[("readonly", "#202a48"), ("active", "#303d66")],
+                  arrowcolor=[("readonly", "#ffffff"), ("disabled", "#7f89aa")],
+                  bordercolor=[("focus", "#9278ff")])
         style.configure("TButton", padding=(10, 8), background="#202a48", foreground="#eef0ff", borderwidth=0)
         style.map("TButton", background=[("active", "#303d66"), ("pressed", "#18213b")])
         style.configure("Accent.TButton", background="#7857ff", foreground="#ffffff", font=("Segoe UI", 10, "bold"))
@@ -75,6 +190,13 @@ class ScheduleBot(tk.Tk):
         style.map("TNotebook.Tab", background=[("selected", "#7857ff")], foreground=[("selected", "#ffffff")])
         style.configure("TCheckbutton", background="#0b1020", foreground="#dbe1fa", padding=3)
         style.map("TCheckbutton", background=[("active", "#0b1020")])
+        style.configure("TLabelframe", background="#0b1020", bordercolor="#344368",
+                        lightcolor="#344368", darkcolor="#344368", relief="solid")
+        style.configure("TLabelframe.Label", background="#0b1020", foreground="#ffffff",
+                        font=("Segoe UI", 10, "bold"))
+        style.configure("TScrollbar", background="#202a48", troughcolor="#0b1020",
+                        bordercolor="#0b1020", arrowcolor="#dbe1fa")
+        style.map("TScrollbar", background=[("active", "#6548dc"), ("pressed", "#7857ff")])
 
     def _build(self):
         frame = ttk.Frame(self, padding=24)
@@ -86,6 +208,8 @@ class ScheduleBot(tk.Tk):
         ttk.Label(heading, text="  CREATOR EDITION", style="Muted.TLabel").pack(side="left", pady=(10, 0))
         ttk.Button(heading, text="◉  Streaming Studio", style="Accent.TButton",
                    command=lambda: StreamStudio(self)).pack(side="right")
+        ttk.Button(heading, text="API setup guide", command=self.show_getting_started).pack(
+            side="right", padx=8)
         ttk.Label(frame, text="What do you want to schedule?", font=("Segoe UI", 13, "bold")).pack(anchor="w")
         ttk.Label(frame, text="Try: Study tomorrow at 7 pm for 2 hours — or select a calendar day",
                   style="Muted.TLabel").pack(anchor="w", pady=(3, 10))
@@ -97,8 +221,21 @@ class ScheduleBot(tk.Tk):
         ttk.Button(row, text="＋  Add to schedule", style="Accent.TButton", command=self.add_task).pack(side="left", padx=(10, 0))
         self.request.focus_set()
 
+        tools = ttk.Frame(frame)
+        tools.pack(fill="x", pady=(12, 0))
+        ttk.Label(tools, text="Search", style="Muted.TLabel").pack(side="left")
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *_args: self.refresh())
+        search = ttk.Entry(tools, textvariable=self.search_var)
+        search.pack(side="left", fill="x", expand=True, padx=(8, 12))
+        self.show_completed = tk.BooleanVar(value=True)
+        ttk.Checkbutton(tools, text="Show completed", variable=self.show_completed,
+                        command=self.refresh).pack(side="left")
+        self.summary_label = ttk.Label(tools, style="Muted.TLabel")
+        self.summary_label.pack(side="right", padx=(12, 0))
+
         content = ttk.Panedwindow(frame, orient="horizontal")
-        content.pack(fill="both", expand=True, pady=14)
+        content.pack(fill="both", expand=True, pady=(10, 14))
         schedule_panel = ttk.Frame(content, style="Card.TFrame", padding=12)
         calendar_panel = ttk.Frame(content, style="Card.TFrame", padding=16)
         content.add(schedule_panel, weight=3)
@@ -111,6 +248,9 @@ class ScheduleBot(tk.Tk):
             self.tree.heading(col, text=col.title())
             self.tree.column(col, width=width, anchor="w")
         self.tree.pack(fill="both", expand=True)
+        self.tree.tag_configure("completed", foreground="#7f89aa")
+        self.tree.bind("<Double-1>", lambda _event: self.edit_selected())
+        self.tree.bind("<Delete>", lambda _event: self.delete_selected())
 
         nav = ttk.Frame(calendar_panel)
         nav.pack(fill="x", pady=(0, 8))
@@ -125,6 +265,8 @@ class ScheduleBot(tk.Tk):
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x")
         ttk.Button(buttons, text="Delete selected", style="Danger.TButton", command=self.delete_selected).pack(side="left")
+        ttk.Button(buttons, text="Edit", command=self.edit_selected).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="✓  Complete", command=self.toggle_completed).pack(side="left", padx=(8, 0))
         ttk.Label(buttons, text="●  All changes saved", style="Saved.TLabel").pack(side="left", padx=14)
         ttk.Button(buttons, text="Export CSV", command=self.export_csv).pack(side="right")
         ttk.Button(buttons, text="Export calendar", command=self.export_ics).pack(side="right", padx=8)
@@ -134,12 +276,87 @@ class ScheduleBot(tk.Tk):
             saved = json.loads(data_file().read_text(encoding="utf-8"))
             if isinstance(saved, list):
                 return saved, {}
+            if not isinstance(saved, dict):
+                raise ValueError("Saved data must be a JSON object.")
             return saved.get("tasks", []), saved.get("stream", {})
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError:
+            return [], {}
+        except (json.JSONDecodeError, ValueError, AttributeError) as error:
+            broken = data_file().with_name("schedule.invalid.json")
+            try:
+                data_file().replace(broken)
+            except OSError:
+                pass
+            self.after(0, lambda detail=str(error), path=str(broken): messagebox.showwarning(
+                "Schedule data could not be loaded",
+                f"ScheduleBot started with an empty schedule because the saved data was invalid.\n\n"
+                f"Details: {detail}\n\nA backup was kept at:\n{path}", parent=self))
             return [], {}
 
     def save(self):
-        data_file().write_text(json.dumps({"tasks": self.tasks, "stream": self.stream_settings}, indent=2), encoding="utf-8")
+        destination = data_file()
+        payload = json.dumps({"tasks": self.tasks, "stream": self.stream_settings}, indent=2)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=destination.parent,
+                                             prefix="schedule-", suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(destination)
+        finally:
+            if temporary and temporary.exists():
+                temporary.unlink()
+
+    def show_getting_started(self):
+        self.stream_settings["onboarding_seen"] = True
+        self.save()
+        dialog = tk.Toplevel(self)
+        dialog.title("API keys & integration setup")
+        dialog.geometry("760x610")
+        dialog.minsize(620, 500)
+        dialog.transient(self)
+        body = ttk.Frame(dialog, padding=20)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Connect your creator tools", font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        ttk.Label(body, text="Choose a service for exact setup steps. You only need the services you use.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(3, 12))
+        selected = tk.StringVar(value="Start here")
+        chooser = ttk.Combobox(body, textvariable=selected, values=tuple(SETUP_GUIDES),
+                               state="readonly", font=("Segoe UI", 11))
+        chooser.pack(fill="x")
+        text_frame = ttk.Frame(body)
+        text_frame.pack(fill="both", expand=True, pady=12)
+        guide = tk.Text(text_frame, wrap="word", bg="#121a2e", fg="#e8ecff",
+                        insertbackground="#ffffff", relief="flat", padx=16, pady=16,
+                        font=("Segoe UI", 10), spacing1=3, spacing3=7)
+        scroll = ttk.Scrollbar(text_frame, orient="vertical", command=guide.yview)
+        guide.configure(yscrollcommand=scroll.set)
+        guide.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        actions = ttk.Frame(body)
+        actions.pack(fill="x")
+        portal = ttk.Button(actions, text="Open official setup page")
+        portal.pack(side="left")
+        ttk.Button(actions, text="Open Streaming Studio", style="Accent.TButton",
+                   command=lambda: StreamStudio(self)).pack(side="right")
+        ttk.Button(actions, text="Close", command=dialog.destroy).pack(side="right", padx=8)
+
+        def show_section(*_args):
+            section = selected.get()
+            guide.configure(state="normal")
+            guide.delete("1.0", "end")
+            guide.insert("1.0", SETUP_GUIDES[section])
+            guide.configure(state="disabled")
+            guide.yview_moveto(0)
+            url = SETUP_URLS.get(section)
+            portal.configure(state="normal" if url else "disabled",
+                             command=(lambda target=url: webbrowser.open(target)) if url else None)
+
+        chooser.bind("<<ComboboxSelected>>", show_section)
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        show_section()
 
     def add_task(self):
         request_text = self.request.get().strip()
@@ -160,12 +377,92 @@ class ScheduleBot(tk.Tk):
 
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
-        for task in self.tasks:
+        query = self.search_var.get().strip().lower() if hasattr(self, "search_var") else ""
+        visible = [task for task in self.tasks
+                   if (self.show_completed.get() or not task.get("completed"))
+                   and (not query or query in task["title"].lower())]
+        for task in visible:
             start = datetime.fromisoformat(task["start"])
             self.tree.insert("", "end", iid=task["id"], values=(start.strftime("%b %d, %Y"),
                 start.strftime("%I:%M %p").lstrip("0"), task["title"],
-                f'{task["duration"]} min', task.get("repeat", "").title()))
+                f'{task["duration"]} min', task.get("repeat", "").title()),
+                tags=("completed",) if task.get("completed") else ())
+        if hasattr(self, "summary_label"):
+            completed = sum(bool(task.get("completed")) for task in self.tasks)
+            self.summary_label.configure(text=f"{len(self.tasks) - completed} open · {completed} completed")
         self.draw_calendar()
+
+    def selected_tasks(self):
+        selected = set(self.tree.selection())
+        return [task for task in self.tasks if task["id"] in selected]
+
+    def toggle_completed(self):
+        selected = self.selected_tasks()
+        if not selected:
+            messagebox.showinfo("Select a task", "Select one or more tasks first.", parent=self)
+            return
+        mark_complete = any(not task.get("completed") for task in selected)
+        for task in selected:
+            task["completed"] = mark_complete
+        self.save()
+        self.refresh()
+
+    def edit_selected(self):
+        selected = self.selected_tasks()
+        if len(selected) != 1:
+            messagebox.showinfo("Edit a task", "Select exactly one task to edit.", parent=self)
+            return
+        task = selected[0]
+        start = datetime.fromisoformat(task["start"])
+        dialog = tk.Toplevel(self)
+        dialog.title("Edit task")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        body = ttk.Frame(dialog, padding=20)
+        body.pack(fill="both", expand=True)
+        fields = (
+            ("Title", tk.StringVar(value=task["title"])),
+            ("Date (YYYY-MM-DD)", tk.StringVar(value=start.strftime("%Y-%m-%d"))),
+            ("Time (HH:MM)", tk.StringVar(value=start.strftime("%H:%M"))),
+            ("Duration (minutes)", tk.StringVar(value=str(task["duration"]))),
+        )
+        for row, (label, variable) in enumerate(fields):
+            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=5)
+            ttk.Entry(body, textvariable=variable, width=34).grid(row=row, column=1, padx=(12, 0), pady=5)
+        repeat = tk.BooleanVar(value=task.get("repeat") == "weekly")
+        ttk.Checkbutton(body, text="Repeat weekly", variable=repeat).grid(
+            row=4, column=1, sticky="w", padx=(12, 0), pady=5)
+
+        def apply_changes():
+            try:
+                title = fields[0][1].get().strip()
+                new_start = datetime.strptime(
+                    f"{fields[1][1].get().strip()} {fields[2][1].get().strip()}", "%Y-%m-%d %H:%M")
+                duration = int(fields[3][1].get())
+                if not title:
+                    raise ValueError("Title cannot be empty.")
+                if duration < 1:
+                    raise ValueError("Duration must be at least one minute.")
+            except ValueError as error:
+                messagebox.showerror("Check task details", str(error), parent=dialog)
+                return
+            task.update(title=title, start=new_start.isoformat(), duration=duration,
+                        repeat="weekly" if repeat.get() else "")
+            self.tasks.sort(key=lambda item: item["start"])
+            self.save()
+            dialog.destroy()
+            self.refresh()
+
+        actions = ttk.Frame(body)
+        actions.grid(row=5, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side="left")
+        ttk.Button(actions, text="Save changes", style="Accent.TButton",
+                   command=apply_changes).pack(side="left", padx=(8, 0))
+        dialog.bind("<Return>", lambda _event: apply_changes())
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.wait_visibility()
+        dialog.focus_set()
 
     @staticmethod
     def has_date_words(text):
@@ -227,6 +524,9 @@ class ScheduleBot(tk.Tk):
     def delete_selected(self):
         selected = set(self.tree.selection())
         if not selected:
+            return
+        noun = "task" if len(selected) == 1 else "tasks"
+        if not messagebox.askyesno("Delete tasks", f"Delete {len(selected)} selected {noun}?", parent=self):
             return
         self.tasks = [task for task in self.tasks if task["id"] not in selected]
         self.save()

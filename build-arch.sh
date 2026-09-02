@@ -10,4 +10,6 @@ fi
 .build-venv/bin/python -m pip install -q -r requirements.txt
 
 .build-venv/bin/pyinstaller --clean --noconfirm ScheduleBot.spec
+sha256sum dist/ScheduleBot > dist/ScheduleBot.sha256
 echo "Built: dist/ScheduleBot"
+echo "Checksum: dist/ScheduleBot.sha256"
